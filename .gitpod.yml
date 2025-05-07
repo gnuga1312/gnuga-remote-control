@@ -1,0 +1,10 @@
+image:
+  file: .gitpod.Dockerfile
+
+tasks:
+  - init: flutter doctor
+    command: code .
+
+vscode:
+  extensions:
+    - Dart-Code.flutter
