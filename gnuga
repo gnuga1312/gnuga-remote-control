@@ -1,0 +1,284 @@
+import 'dart:typed_data';
+import 'package:flutter/material.dart';
+import 'package:flutter_bluetooth_serial/flutter_bluetooth_serial.dart';
+import 'package:google_maps_flutter/google_maps_flutter.dart';
+import 'package:geolocator/geolocator.dart';
+import 'package:speech_to_text/speech_to_text.dart' as stt;
+
+void main() => runApp(const MyApp());
+
+class MyApp extends StatelessWidget {
+  const MyApp({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      title: 'Gnuga Remote Control',
+      debugShowCheckedModeBanner: false,
+      theme: ThemeData.dark().copyWith(
+        primaryColor: Colors.teal,
+        scaffoldBackgroundColor: const Color(0xFF121212),
+        elevatedButtonTheme: ElevatedButtonThemeData(
+          style: ElevatedButton.styleFrom(
+            backgroundColor: Colors.teal,
+            foregroundColor: Colors.white,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
+            textStyle: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+          ),
+        ),
+      ),
+      home: const LoginPage(),
+    );
+  }
+}
+
+class LoginPage extends StatefulWidget {
+  const LoginPage({super.key});
+
+  @override
+  State<LoginPage> createState() => _LoginPageState();
+}
+
+class _LoginPageState extends State<LoginPage> {
+  final TextEditingController _controller = TextEditingController();
+  final String kodeModul = "123456";
+
+  void _login() {
+    if (_controller.text == kodeModul) {
+      Navigator.push(context, MaterialPageRoute(builder: (_) => const ControlPage()));
+    } else {
+      showDialog(
+        context: context,
+        builder: (_) => AlertDialog(
+          title: const Text("Login Gagal"),
+          content: const Text("Kode salah. Silakan coba lagi."),
+          actions: [TextButton(onPressed: () => Navigator.pop(context), child: const Text("OK"))],
+        ),
+      );
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: Center(
+        child: Padding(
+          padding: const EdgeInsets.all(24.0),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              const Text("Masukkan Kode Modul", style: TextStyle(fontSize: 24)),
+              const SizedBox(height: 16),
+              TextField(
+                controller: _controller,
+                keyboardType: TextInputType.number,
+                maxLength: 6,
+                decoration: InputDecoration(
+                  filled: true,
+                  fillColor: Colors.white10,
+                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+                ),
+              ),
+              const SizedBox(height: 20),
+              ElevatedButton(
+                onPressed: _login,
+                child: const Text("Login"),
+              )
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class ControlPage extends StatefulWidget {
+  const ControlPage({super.key});
+
+  @override
+  State<ControlPage> createState() => _ControlPageState();
+}
+
+class _ControlPageState extends State<ControlPage> {
+  bool modeAman = false;
+  BluetoothConnection? connection;
+  bool isConnected = false;
+  Position? _currentPosition;
+  GoogleMapController? _mapController;
+  late stt.SpeechToText _speech;
+  bool _isListening = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _speech = stt.SpeechToText();
+  }
+
+  Future<void> _connectBluetooth() async {
+    final BluetoothDevice? selectedDevice = await FlutterBluetoothSerial.instance
+        .getBondedDevices()
+        .then((devices) => devices.isNotEmpty ? devices.first : null);
+
+    if (selectedDevice != null) {
+      BluetoothConnection.toAddress(selectedDevice.address).then((conn) {
+        connection = conn;
+        setState(() => isConnected = true);
+      }).catchError((e) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text("Gagal koneksi Bluetooth: \$e")),
+        );
+      });
+    }
+  }
+
+  void _sendCommand(String command) {
+    if (connection != null && isConnected) {
+      connection!.output.add(Uint8List.fromList("$command\n".codeUnits));
+    }
+  }
+
+  Future<void> _getCurrentLocation() async {
+    bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
+    if (!serviceEnabled) {
+      await Geolocator.openLocationSettings();
+      return;
+    }
+    LocationPermission permission = await Geolocator.checkPermission();
+    if (permission == LocationPermission.denied) {
+      permission = await Geolocator.requestPermission();
+    }
+    if (permission == LocationPermission.deniedForever) {
+      return;
+    }
+
+    final position = await Geolocator.getCurrentPosition();
+    setState(() => _currentPosition = position);
+    _mapController?.animateCamera(
+      CameraUpdate.newLatLng(LatLng(position.latitude, position.longitude)),
+    );
+  }
+
+  void _openGpsTracker() async {
+    await _getCurrentLocation();
+    if (_currentPosition != null) {
+      showDialog(
+        context: context,
+        builder: (context) => AlertDialog(
+          content: SizedBox(
+            width: double.infinity,
+            height: 400,
+            child: GoogleMap(
+              initialCameraPosition: CameraPosition(
+                target: LatLng(_currentPosition!.latitude, _currentPosition!.longitude),
+                zoom: 16,
+              ),
+              markers: {
+                Marker(
+                  markerId: const MarkerId('lokasi'),
+                  position: LatLng(_currentPosition!.latitude, _currentPosition!.longitude),
+                )
+              },
+              onMapCreated: (controller) => _mapController = controller,
+            ),
+          ),
+        ),
+      );
+    }
+  }
+
+  void _startListening() async {
+    if (!_isListening) {
+      bool available = await _speech.initialize();
+      if (available) {
+        setState(() => _isListening = true);
+        _speech.listen(onResult: (result) {
+          String command = result.recognizedWords.toLowerCase();
+          if (command.contains("hidupkan lampu")) {
+            _sendCommand("POWER_ON");
+          } else if (command.contains("matikan lampu")) {
+            _sendCommand("POWER_OFF");
+          } else if (command.contains("starter") || command.contains("hidupkan mesin")) {
+            _sendCommand("STARTER_ON");
+          } else if (command.contains("matikan mesin")) {
+            _sendCommand("STARTER_OFF");
+          } else if (command.contains("hidupkan alarm")) {
+            _sendCommand("ALARM_ON");
+          } else if (command.contains("matikan alarm")) {
+            _sendCommand("ALARM_OFF");
+          } else if (command.contains("auto")) {
+            _sendCommand("AUTO");
+          }
+        });
+      }
+    } else {
+      setState(() => _isListening = false);
+      _speech.stop();
+    }
+  }
+
+  Widget _buildButton(String label, VoidCallback onPressed, {double width = 110, double height = 60}) {
+    return SizedBox(
+      width: width,
+      height: height,
+      child: ElevatedButton(
+        onPressed: onPressed,
+        child: Text(label, textAlign: TextAlign.center),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text("Gnuga Remote Control"),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.bluetooth),
+            onPressed: _connectBluetooth,
+          )
+        ],
+      ),
+      body: Center(
+        child: SingleChildScrollView(
+          child: Padding(
+            padding: const EdgeInsets.all(16.0),
+            child: Column(
+              children: [
+                Wrap(
+                  spacing: 16,
+                  runSpacing: 16,
+                  children: [
+                    _buildButton("Power", () => _sendCommand("POWER")),
+                    _buildButton("Auto Starter", () => _sendCommand("AUTO")),
+                    _buildButton("Alarm", () => _sendCommand("ALARM")),
+                    _buildButton("GPS Tracker", _openGpsTracker),
+                    _buildButton(_isListening ? "Stop Voice" : "Voice", _startListening),
+                  ],
+                ),
+                const SizedBox(height: 20),
+                _buildButton("Starter", () => _sendCommand("STARTER"), width: double.infinity, height: 80),
+                const SizedBox(height: 20),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    const Text("Mode Normal"),
+                    Switch(
+                      value: modeAman,
+                      onChanged: (val) {
+                        setState(() => modeAman = val);
+                        _sendCommand(val ? "MODE_AMAN" : "MODE_NORMAL");
+                      },
+                    ),
+                    const Text("Mode Aman"),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
